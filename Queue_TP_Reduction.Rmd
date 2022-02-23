@@ -1,0 +1,394 @@
+---
+title: "Queue TP Reduction"
+author: "Logan Wu"
+date: "`r format(lubridate::today(), '%B %e, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(patchwork)
+library(readxl)
+library(lubridate)
+```
+
+This RMarkdown illustrates the effectiveness of queueing strategy on transmission potential (TP) reduction in a contact tracing context.
+
+```{r}
+data_dir = "data"
+linelist_file = list.files(data_dir, "Linelist_Cases")
+
+if (length(linelist_file) == 1) {
+  linelist = read_excel(file.path(data_dir, linelist_file)) %>%
+    mutate_if(is.POSIXct, as_date)
+  # Interview delay plot
+  weekly_delays = linelist %>%
+    mutate(total_delay = InterviewDate - DiagnosisDate,
+           total_delay = ifelse(total_delay < 0, 0, total_delay),
+           total_delay = ifelse(total_delay > 7, 7, total_delay),
+           total_delay = total_delay %>% as_factor() %>% fct_recode("<1"="0", "7+"="7"),
+           DiagnosisDate = as_date(round(as.numeric(DiagnosisDate) / 7) * 7)) %>%
+    filter(DiagnosisDate > as_date("2020-01-01")) %>%
+    count(DiagnosisDate, total_delay) %>%
+    group_by(DiagnosisDate) %>%
+    mutate(pct = n / sum(n)) %>%
+    ungroup()
+  weekly_counts = linelist %>%
+    mutate(DiagnosisDate = as_date(round(as.numeric(DiagnosisDate) / 7) * 7)) %>%
+    filter(DiagnosisDate > as_date("2020-01-01")) %>%
+    count(DiagnosisDate) %>%
+    mutate(scaled_n = n / max(n))
+  
+  ggplot() +
+    geom_col(data=weekly_delays, aes(x = DiagnosisDate, y = pct, fill=total_delay)) +
+    geom_line(data=weekly_counts, aes(x=DiagnosisDate, y=scaled_n), color="white", size=2) +
+    geom_line(data=weekly_counts, aes(x=DiagnosisDate, y=scaled_n), color="black", size=0.5) +
+    scale_fill_brewer(direction=-1, palette="Spectral", na.value="grey") +
+    theme_minimal() +
+    theme(legend.position="bottom") +
+    labs(title = "Victorian COVID-19 interview delays",
+         x = "Diagnosis week",
+         y = "Percent of interviewed cases",
+         fill = "Interview delay (days)\nafter Dept. notification") +
+    scale_x_date(date_breaks = "3 months", labels = function(x) format(x, "%b '%y")) +
+    scale_y_continuous(labels = scales::percent,
+                       sec.axis = sec_axis( trans=~.*max(weekly_counts$n), name="Weekly cases"))
+  ggsave("plot6.svg", width=150, height=75, units="mm")
+}
+```
+
+
+Define our priority functions.
+
+```{r}
+oldest_swab = function(x) {
+  x %>%
+    arrange(
+      # Whether case is eligible to be interviewed
+      desc(eligible_for_interview),
+      # Priorities, in order of appearance
+      swab_date, # oldest first
+      vaccinated # vaccinated FALSE first
+    )
+}
+
+newest_swab = function(x) {
+  x %>%
+    arrange(
+      # Whether case is eligible to be interviewed
+      desc(eligible_for_interview),
+      # Priorities, in order of appearance
+      desc(swab_date), # newest first
+      vaccinated # vaccinated FALSE first
+    )
+}
+
+newest_notification = function(x) {
+  x %>%
+    arrange(
+      # Whether case is eligible to be interviewed
+      desc(eligible_for_interview),
+      # Priorities, in order of appearance
+      desc(notification_date), # newest first
+      vaccinated # vaccinated FALSE first
+    )
+}
+
+random_swab <- function(x) {
+  x %>%
+    mutate(ix = runif(n())) %>%
+    arrange(
+      # Whether case is eligible to be interviewed
+      desc(eligible_for_interview),
+      # Priorities, in order of appearance
+      ix
+    ) %>%
+    select(-ix)
+}
+```
+
+Create a dataframe representing the linelist and process the queue day by day.
+
+```{r}
+sim_tracing = function(capacity_ratio = 0.8,
+                       max_interview_delay = 5,
+                       prop_priority = 0.4,
+                       prop_time_delay = 0.2,
+                       f_priority = f_priority,
+                       proportion_cases_vaccinated = 0.05,
+                       days_samples = 100,
+                       days_burnin = 10,
+                       days_burnout = 5,
+                       mean_rate = 20) {
+  n_samples = days_samples * mean_rate
+  n_burnin = days_burnin * mean_rate
+  n_burnout = days_burnout * mean_rate
+  capacity = capacity_ratio * mean_rate
+  
+  #' Generate a sample case rate with a Poisson process
+  create_swab_date = function(n, mean_rate) {
+    swab_date = numeric(0)
+    i = 1
+    while (length(swab_date) < (n)) {
+      # swab_date = c(swab_date, rep(i, rpois(1, mean_rate)))
+      swab_date = c(swab_date, rep(i, rnbinom(1, mu=mean_rate, size=mean_rate)))
+      i = i + 1
+    }
+    swab_date = swab_date[seq_len(n)]
+  }
+  
+  samples = tibble(
+    swab_date = create_swab_date(n_burnin+n_samples+n_burnout, mean_rate),
+    notification_date = swab_date + pmin(rpois(n_burnin + n_samples + n_burnout, 1), 8),
+    notification_time = runif(n_burnin + n_samples + n_burnout),
+    vaccinated = runif(n_burnin + n_samples + n_burnout) <= proportion_cases_vaccinated,
+    interview_date = NA_integer_
+  )
+  # pb = txtProgressBar(min = 1, max = max(samples$notification_date), initial = 1)
+  for (sim_day in seq_len(max(samples$notification_date))) {
+    # setTxtProgressBar(pb, sim_day)
+    samples = samples %>%
+      mutate(eligible_for_interview = notification_date <= sim_day & is.na(interview_date) & notification_date >= (sim_day-max_interview_delay) & !(notification_date==sim_day & notification_time < prop_time_delay)) %>%
+      f_priority() %>%
+      mutate(interview_date = ifelse(
+        row_number() <= capacity & eligible_for_interview,
+        sim_day,         # Interview
+        interview_date)) # No interview
+  }
+  
+  # Remove burnin and burnout
+  samples = samples[(n_burnin+1):(n_burnin+n_samples),] %>%
+    mutate(
+      vaccinated = ifelse(vaccinated, "Pfizer", "None"),
+      test_turnaround_time = notification_date - swab_date,
+      time_to_interview = replace_na(interview_date - notification_date, -2)
+    )
+}
+```
+
+Execute sim_tracing function convergence test
+
+```{r}
+mean_rates = c(10, 100, 1000, 10000)
+z = 1.96
+
+samples_list = lapply(mean_rates, function(x) {
+  print(x)
+  sim_tracing(mean_rate = x,
+              f_priority = random_swab,
+              days_samples = 1000) %>%
+    count(time_to_interview) %>%
+    mutate(p = n / sum(n),
+           center = (n + 0.5*z^2) / (sum(n) + z^2),
+           n = as.double(n),
+           band = (z / (sum(n) + z^2)) * sqrt((n * (sum(n)-n)) / sum(n) + z^2/4),
+           lower = center - band,
+           upper = center + band,
+           mean_rate = x)
+})
+samples_list.2 = samples_list %>%
+  bind_rows()
+
+xmax = max(samples_list.2$time_to_interview)
+samples_list.2 %>%
+  ggplot(aes(x = time_to_interview, y = p, color = mean_rate, group = mean_rate)) +
+  geom_errorbar(aes(ymin = lower, ymax=upper), position=position_dodge(0.5)) +
+  geom_point(position = position_dodge(0.5)) +
+  scale_color_gradient(trans = "log", breaks=mean_rates, labels=scales::comma) +
+  scale_x_continuous(breaks = c(-2, 0:xmax), labels=c("Missed", 0:xmax)) +
+  theme(axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid.minor = element_blank()) +
+  labs(title = "Convergence with capacity ratio = 0.5 \u00D7 mean rate",
+       x = "Overall interview delay (days)",
+       y = "Proportion of cases",
+       color = "Mean rate")
+ggsave("plot1.svg", width=150, height=75, units="mm")
+```
+
+# Run experiments
+
+```{r}
+strategies = list(
+  "Random" = random_swab,
+  "Oldest swab" = oldest_swab,
+  "Newest swab" = newest_swab,
+  "Newest notification" = newest_notification
+)
+mean_rate = 20
+
+strategy_samples = lapply(strategies, function(f) {
+  sim_tracing(mean_rate = mean_rate,
+              days_samples = 1000,
+              f_priority = f)
+})
+
+strategy_summary = lapply(strategy_samples, function(x) {
+  x %>%
+    count(time_to_interview) %>%
+    mutate(p = n / sum(n),
+           center = (n + 0.5*z^2) / (sum(n) + z^2),
+           n = as.double(n),
+           band = (z / (sum(n) + z^2)) * sqrt((n * (sum(n)-n)) / sum(n) + z^2/4),
+           lower = center - band,
+           upper = center + band,
+           mean_rate = mean_rate)
+})
+
+strategy_plot_data = bind_rows(strategy_summary, .id="strategy") %>%
+  mutate(strategy = strategy %>% fct_inorder())
+xmax = max(strategy_plot_data$time_to_interview)
+ggplot(strategy_plot_data,
+       aes(x = time_to_interview,
+           y = center,
+           fill = time_to_interview >= 0)) +
+  geom_col() +
+  geom_errorbar(aes(ymin = lower, ymax=upper), width=0.5) +
+  facet_grid(cols = vars(strategy)) +
+  scale_x_continuous(breaks = c(-2, 0:xmax), labels=c("Missed", 0:xmax)) +
+  theme(axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  labs(title = "Overall interview delay distributions for prioritisation strategies",
+       x = "Overall interview delay (days)",
+       y = "Proportion of cases",
+       fill = "Interviewed\n(to show NAs)")
+ggsave("plot2.svg", width=150, height=75, units="mm")
+```
+
+# TP reduction
+
+Nick's method
+
+```{r}
+gi_meanlog = 1.375738
+gi_sdlog = 0.5665299
+p_active_detection = 0.95
+passive_detection_given_symptoms = 0.5
+
+# (this will change as a function of vaccination coverage)
+pr_symptoms = 0.3
+p_passive_detection = passive_detection_given_symptoms * pr_symptoms
+
+tp_reduction_individual = function(time_to_interview) {
+  tp_multiplier_if_found = plnorm(time_to_interview, gi_meanlog, gi_sdlog)
+  p_found = p_active_detection + p_passive_detection - p_active_detection * p_passive_detection
+  tp_multiplier = 1 + p_found * (tp_multiplier_if_found - 1)
+  tp_reduction = 1 - tp_multiplier
+}
+
+#' Mean estimator
+tp_reduction = function(df, n=10000) {
+  tp_reduction = tp_reduction_individual(df$time_to_interview)
+  mean_bootstrap = replicate(
+    n,
+    mean(sample(tp_reduction, length(tp_reduction), replace=TRUE)))
+  mean_bootstrap_quantiles = quantile(mean_bootstrap, c(0.025, 0.975))
+  tibble(mean = mean(tp_reduction),
+         lower = mean_bootstrap_quantiles[[1]],
+         upper = mean_bootstrap_quantiles[[2]])
+}
+
+strategy_tp = lapply(strategy_samples, tp_reduction) %>%
+  bind_rows(.id = "name")
+
+ggplot(strategy_tp, aes(x=name, y=mean, label=round(mean, 3))) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
+  geom_text(vjust = 1, color = "white", nudge_y = -0.005) +
+  coord_cartesian(ylim = c(min(strategy_tp$lower - 0.05), NA)) +
+  labs(title = "Transmission potential reduction",
+       subtitle = "P(Sx) = 0.3, P(Active detect) = 0.95, P(Passive detect$|$Sx) = 0.5",
+       x = "Interview queue priority",
+       y = "Reduction factor")
+# ggsave("plot3.svg", width=75, height=75, units="mm")
+```
+
+Kretzschmar method
+
+Read in estimates for TP reduction by lab/interview delays.
+
+```{r}
+# Define TP reductions
+kretzschmar_lookup = read.csv("../data-public/testing_delay_kretzschmar_table_2_extended.csv") %>%
+  pivot_longer(-Testing.delay,
+               names_to = "contact_tracing_delay",
+               values_to = "kretzschmar_tp_reduction") %>%
+  mutate(contact_tracing_delay = contact_tracing_delay %>%
+           str_remove_all("[^[0-9]]") %>%
+           as.numeric() %>%
+           replace_na(-2))
+# vaccine_tp_reduction = tribble(
+#   ~vaccine, ~vaccine_tp_reduction,
+#   "AZ", 0.505,
+#   "Pfizer", 0.505,
+#   "None", 0
+# )
+```
+
+Apply TP reductions to each case
+
+```{r}
+kretzschmar_reduction_individual = function(df) {
+  df %>%
+    # Calculate TP reductions
+    # left_join(vaccine_tp_reduction,
+    #           by = c("vaccinated" = "vaccine")) %>%
+    left_join(kretzschmar_lookup,
+              by = c("test_turnaround_time" = "Testing.delay",
+                     "time_to_interview" = "contact_tracing_delay")) %>%
+    pull(kretzschmar_tp_reduction)
+}
+
+#' Mean estimator
+kretzschmar_tp_reduction = function(df, n=10000) {
+  tp_reduction = kretzschmar_reduction_individual(df)
+  mean_bootstrap = replicate(
+    n,
+    mean(sample(tp_reduction, length(tp_reduction), replace=TRUE)))
+  mean_bootstrap_quantiles = quantile(mean_bootstrap, c(0.025, 0.975), na.rm=TRUE)
+  tibble(mean = mean(tp_reduction),
+         lower = mean_bootstrap_quantiles[[1]],
+         upper = mean_bootstrap_quantiles[[2]])
+}
+
+kretzschmar_strategy_tp = lapply(strategy_samples, kretzschmar_tp_reduction) %>%
+  bind_rows(.id = "name")
+
+ggplot(kretzschmar_strategy_tp, aes(x=name, y=mean, label=round(mean, 3))) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
+  geom_text(vjust = 1, color = "white", nudge_y = -0.005) +
+  coord_cartesian(ylim = c(min(kretzschmar_strategy_tp$lower) - 0.05, NA)) +
+  labs(title = "Transmission potential reduction",
+       subtitle = "Kretzschmar method",
+       x = "Interview queue strategy",
+       y = "Reduction factor")
+# ggsave("plot4.svg", width=75, height=75, units="mm")
+
+bind_rows(Golding = strategy_tp,
+          Kretzschmar = kretzschmar_strategy_tp,
+          .id="method") %>%
+  mutate(method = paste(method, "method")) %>%
+  ggplot(aes(x=name, y=mean, label=round(mean, 3))) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
+  geom_text(vjust = 1, color = "white", nudge_y = -0.005) +
+  coord_cartesian(ylim = c(min(kretzschmar_strategy_tp$lower) - 0.025, NA)) +
+  facet_wrap(vars(method), ncol=1, scales="free_y") +
+  labs(title = "Transmission potential reduction with an under-resourced contact tracing queue",
+       x = "Interview queue priority",
+       y = "Reduction factor") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+ggsave("plot5.svg", width=150, height=75, units="mm")
+```
+
+## Invariance to absolute size
+
+```{r}
+
+```
