@@ -63,6 +63,13 @@ if (length(linelist_file) == 1) {
 Define our priority functions.
 
 ```{r}
+#' Oldest swab priority function
+#'
+#' Arranges the current queue by the order they should be interviewed in. Should
+#' always begin with the interview eligibility criteria so interviewable cases
+#' are at the top.
+#'
+#' @param x Data frame of the current queue state
 oldest_swab = function(x) {
   x %>%
     arrange(
@@ -112,6 +119,21 @@ random_swab <- function(x) {
 Create a dataframe representing the linelist and process the queue day by day.
 
 ```{r}
+#' Run queue simulation
+#' 
+#' Function to run the simulation. Written as a function to make multiple runs
+#' more convenient.
+#'
+#' @param capacity_ratio Daily capacity is this fraction of the mean incoming case rate.
+#' @param max_interview_delay Cases cannot be interviewed greater than this number of days after their notification.
+#' @param prop_priority Proportion of cases that can be assigned to a 'priority' group. Currently has no effect on TP.
+#' @param prop_time_delay Proportion of cases that are notified after hours and cannot be called the same day.
+#' @param f_priority Prioritisation function to be applied before deciding which cases to interview on a given day.
+#' @param proportion_cases_vaccinated Simular to prop_priority, proportion of cases that should be assigned a 'vaccinated' flag before prioritisation.
+#' @param days_samples Approximate number of days to sample arrivals from. The actual number can vary due to arrival sampling.
+#' @param days_burnin Approximate number of days to sample and discard to initialise the queue.
+#' @param days_burnout Days to simulate after the sample days so cases near the end can be interviewed.
+#' @param mean_rate Mean arrival rate.
 sim_tracing = function(capacity_ratio = 0.8,
                        max_interview_delay = 5,
                        prop_priority = 0.4,
@@ -139,6 +161,7 @@ sim_tracing = function(capacity_ratio = 0.8,
     swab_date = swab_date[seq_len(n)]
   }
   
+  # Initialise population
   samples = tibble(
     swab_date = create_swab_date(n_burnin+n_samples+n_burnout, mean_rate),
     notification_date = swab_date + pmin(rpois(n_burnin + n_samples + n_burnout, 1), 8),
@@ -146,12 +169,16 @@ sim_tracing = function(capacity_ratio = 0.8,
     vaccinated = runif(n_burnin + n_samples + n_burnout) <= proportion_cases_vaccinated,
     interview_date = NA_integer_
   )
+  
+  # Run queue simulation
   # pb = txtProgressBar(min = 1, max = max(samples$notification_date), initial = 1)
   for (sim_day in seq_len(max(samples$notification_date))) {
     # setTxtProgressBar(pb, sim_day)
     samples = samples %>%
       mutate(eligible_for_interview = notification_date <= sim_day & is.na(interview_date) & notification_date >= (sim_day-max_interview_delay) & !(notification_date==sim_day & notification_time < prop_time_delay)) %>%
+      # Sort by priority function
       f_priority() %>%
+      # Apply interview status
       mutate(interview_date = ifelse(
         row_number() <= capacity & eligible_for_interview,
         sim_day,         # Interview
