@@ -225,6 +225,7 @@ samples_list.2 %>%
   geom_point(position = position_dodge(0.5)) +
   scale_color_gradient(trans = "log", breaks=mean_rates, labels=scales::comma) +
   scale_x_continuous(breaks = c(-2, 0:xmax), labels=c("Missed", 0:xmax)) +
+  theme_minimal() +
   theme(axis.ticks.x = element_blank(),
         axis.ticks.y = element_blank(),
         panel.grid.minor = element_blank()) +
@@ -275,6 +276,7 @@ ggplot(strategy_plot_data,
   geom_errorbar(aes(ymin = lower, ymax=upper), width=0.5) +
   facet_grid(cols = vars(strategy)) +
   scale_x_continuous(breaks = c(-2, 0:xmax), labels=c("Missed", 0:xmax)) +
+  theme_minimal() +
   theme(axis.ticks.x = element_blank(),
         axis.ticks.y = element_blank(),
         panel.grid.minor = element_blank(),
@@ -307,7 +309,7 @@ tp_reduction_individual = function(time_to_interview) {
   tp_reduction = 1 - tp_multiplier
 }
 
-#' Mean estimator
+#' Mean estimator using bootstrapping
 tp_reduction = function(df, n=10000) {
   tp_reduction = tp_reduction_individual(df$time_to_interview)
   mean_bootstrap = replicate(
@@ -330,7 +332,8 @@ ggplot(strategy_tp, aes(x=name, y=mean, label=round(mean, 3))) +
   labs(title = "Transmission potential reduction",
        subtitle = "P(Sx) = 0.3, P(Active detect) = 0.95, P(Passive detect$|$Sx) = 0.5",
        x = "Interview queue priority",
-       y = "Reduction factor")
+       y = "Reduction factor") +
+  theme_minimal()
 # ggsave("plot3.svg", width=75, height=75, units="mm")
 ```
 
@@ -340,7 +343,7 @@ Read in estimates for TP reduction by lab/interview delays.
 
 ```{r}
 # Define TP reductions
-kretzschmar_lookup = read.csv("../data-public/testing_delay_kretzschmar_table_2_extended.csv") %>%
+kretzschmar_lookup = read.csv("data-public/testing_delay_kretzschmar_table_2_extended.csv") %>%
   pivot_longer(-Testing.delay,
                names_to = "contact_tracing_delay",
                values_to = "kretzschmar_tp_reduction") %>%
@@ -373,6 +376,7 @@ kretzschmar_reduction_individual = function(df) {
 #' Mean estimator
 kretzschmar_tp_reduction = function(df, n=10000) {
   tp_reduction = kretzschmar_reduction_individual(df)
+  tp_reduction = tp_reduction[!is.na(tp_reduction)] # Ignore any that go out of the bounds explored by Kretzschmar. Count is negligible (e.g. 1/20000) - alternatively could ensure RNGs do not go out of range.
   mean_bootstrap = replicate(
     n,
     mean(sample(tp_reduction, length(tp_reduction), replace=TRUE)))
@@ -381,19 +385,20 @@ kretzschmar_tp_reduction = function(df, n=10000) {
          lower = mean_bootstrap_quantiles[[1]],
          upper = mean_bootstrap_quantiles[[2]])
 }
-
-kretzschmar_strategy_tp = lapply(strategy_samples, kretzschmar_tp_reduction) %>%
+library(future.apply)
+plan(multisession, workers = 4)
+kretzschmar_strategy_tp = future_lapply(strategy_samples, kretzschmar_tp_reduction) %>%
   bind_rows(.id = "name")
 
-ggplot(kretzschmar_strategy_tp, aes(x=name, y=mean, label=round(mean, 3))) +
-  geom_col(fill = "steelblue") +
-  geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
-  geom_text(vjust = 1, color = "white", nudge_y = -0.005) +
-  coord_cartesian(ylim = c(min(kretzschmar_strategy_tp$lower) - 0.05, NA)) +
-  labs(title = "Transmission potential reduction",
-       subtitle = "Kretzschmar method",
-       x = "Interview queue strategy",
-       y = "Reduction factor")
+# ggplot(kretzschmar_strategy_tp, aes(x=name, y=mean, label=round(mean, 3))) +
+#   geom_col(fill = "steelblue") +
+#   geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
+#   geom_text(vjust = 1, color = "white", nudge_y = -0.005) +
+#   coord_cartesian(ylim = c(min(kretzschmar_strategy_tp$lower) - 0.05, NA)) +
+#   labs(title = "Transmission potential reduction",
+#        subtitle = "Kretzschmar method",
+#        x = "Interview queue strategy",
+#        y = "Reduction factor")
 # ggsave("plot4.svg", width=75, height=75, units="mm")
 
 bind_rows(Golding = strategy_tp,
