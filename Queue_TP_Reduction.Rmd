@@ -273,13 +273,14 @@ ggplot(strategy_plot_data,
            y = center,
            fill = time_to_interview >= 0)) +
   geom_col() +
-  geom_errorbar(aes(ymin = lower, ymax=upper), width=0.5) +
+  # geom_errorbar(aes(ymin = lower, ymax=upper), width=0.5) +
   facet_grid(cols = vars(strategy)) +
   scale_x_continuous(breaks = c(-2, 0:xmax), labels=c("Missed", 0:xmax)) +
   theme_minimal() +
   theme(axis.ticks.x = element_blank(),
         axis.ticks.y = element_blank(),
         panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
         legend.position = "none") +
   labs(title = "Overall interview delay distributions for prioritisation strategies",
        x = "Overall interview delay (days)",
@@ -326,15 +327,16 @@ strategy_tp = lapply(strategy_samples, tp_reduction) %>%
 
 ggplot(strategy_tp, aes(x=name, y=mean, label=round(mean, 3))) +
   geom_col(fill = "steelblue") +
-  geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
+  # geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
   geom_text(vjust = 1, color = "white", nudge_y = -0.005) +
   coord_cartesian(ylim = c(min(strategy_tp$lower - 0.05), NA)) +
   labs(title = "Transmission potential reduction",
-       subtitle = "P(Sx) = 0.3, P(Active detect) = 0.95, P(Passive detect$|$Sx) = 0.5",
+       subtitle = "P(Sx) = 0.3, P(Active detect) = 0.95, P(Passive detect|Sx) = 0.5",
        x = "Interview queue priority",
        y = "Reduction factor") +
-  theme_minimal()
-# ggsave("plot3.svg", width=75, height=75, units="mm")
+  theme_minimal() +
+  theme(panel.grid.major.x = element_blank())
+ ggsave("plot3.svg", width=150, height=75, units="mm")
 ```
 
 Kretzschmar method
@@ -415,7 +417,8 @@ bind_rows(Golding = strategy_tp,
        x = "Interview queue priority",
        y = "Reduction factor") +
   theme(axis.text.y = element_blank(),
-        axis.ticks.y = element_blank())
+        axis.ticks.y = element_blank(),
+        panel.grid = element_blank())
 ggsave("plot5.svg", width=150, height=75, units="mm")
 ```
 
