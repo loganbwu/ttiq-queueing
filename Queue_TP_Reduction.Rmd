@@ -12,6 +12,13 @@ library(tidyverse)
 library(patchwork)
 library(readxl)
 library(lubridate)
+library(distributional)
+library(future.apply)
+library(truncdist)
+plan(multisession)
+z = 1.96
+
+for(x in list.files("R", full.names=T)) {source(x)}
 ```
 
 This RMarkdown illustrates the effectiveness of queueing strategy on transmission potential (TP) reduction in a contact tracing context.
@@ -21,7 +28,7 @@ data_dir = "data"
 linelist_file = list.files(data_dir, "Linelist_Cases")
 
 if (length(linelist_file) == 1) {
-  linelist = read_excel(file.path(data_dir, linelist_file)) %>%
+  linelist = suppressWarnings(read_excel(file.path(data_dir, linelist_file))) %>%
     mutate_if(is.POSIXct, as_date)
   # Interview delay plot
   weekly_delays = linelist %>%
@@ -175,7 +182,10 @@ sim_tracing = function(capacity_ratio = 0.8,
   for (sim_day in seq_len(max(samples$notification_date))) {
     # setTxtProgressBar(pb, sim_day)
     samples = samples %>%
-      mutate(eligible_for_interview = notification_date <= sim_day & is.na(interview_date) & notification_date >= (sim_day-max_interview_delay) & !(notification_date==sim_day & notification_time < prop_time_delay)) %>%
+      mutate(eligible_for_interview = notification_date <= sim_day & # Notification has happened
+               is.na(interview_date) & # Hasn't been interviewed already
+               swab_date >= (sim_day-max_interview_delay) & # Notification hasn't expired
+               !(notification_date==sim_day & notification_time < prop_time_delay)) %>%
       # Sort by priority function
       f_priority() %>%
       # Apply interview status
@@ -188,20 +198,20 @@ sim_tracing = function(capacity_ratio = 0.8,
   # Remove burnin and burnout
   samples = samples[(n_burnin+1):(n_burnin+n_samples),] %>%
     mutate(
+      samples_isol_swab = rpois(n(), 1),
       vaccinated = ifelse(vaccinated, "Pfizer", "None"),
       test_turnaround_time = notification_date - swab_date,
-      time_to_interview = replace_na(interview_date - notification_date, -2)
+      time_to_interview = replace_na(interview_date - swab_date, Inf)
     )
 }
 ```
 
 Execute sim_tracing function convergence test
 
-```{r}
+```{r, eval=F}
 mean_rates = c(10, 100, 1000, 10000)
-z = 1.96
 
-samples_list = lapply(mean_rates, function(x) {
+samples_list = future_lapply(mean_rates, function(x) {
   print(x)
   sim_tracing(mean_rate = x,
               f_priority = random_swab,
@@ -247,11 +257,14 @@ strategies = list(
 )
 mean_rate = 20
 
-strategy_samples = lapply(strategies, function(f) {
+strategy_samples = future_lapply(strategies, function(f) {
   sim_tracing(mean_rate = mean_rate,
-              days_samples = 1000,
-              f_priority = f)
-})
+              capacity_ratio = 0.8,
+              days_samples = 10000,
+              f_priority = f) %>%
+    mutate(time_to_interview = ifelse(time_to_interview < 0, Inf, time_to_interview))
+},
+future.seed=TRUE)
 
 strategy_summary = lapply(strategy_samples, function(x) {
   x %>%
@@ -267,15 +280,16 @@ strategy_summary = lapply(strategy_samples, function(x) {
 
 strategy_plot_data = bind_rows(strategy_summary, .id="strategy") %>%
   mutate(strategy = strategy %>% fct_inorder())
-xmax = max(strategy_plot_data$time_to_interview)
+xmax = max(strategy_plot_data$time_to_interview[is.finite(strategy_plot_data$time_to_interview)])
+strategy_plot_data$time_to_interview[is.infinite(strategy_plot_data$time_to_interview)] <- xmax + 2
 ggplot(strategy_plot_data,
        aes(x = time_to_interview,
            y = center,
-           fill = time_to_interview >= 0)) +
+           fill = time_to_interview <= xmax)) +
   geom_col() +
   # geom_errorbar(aes(ymin = lower, ymax=upper), width=0.5) +
   facet_grid(cols = vars(strategy)) +
-  scale_x_continuous(breaks = c(-2, 0:xmax), labels=c("Missed", 0:xmax)) +
+  scale_x_continuous(breaks = c(0:xmax, xmax+2), labels=c(0:xmax, "Missed")) +
   theme_minimal() +
   theme(axis.ticks.x = element_blank(),
         axis.ticks.y = element_blank(),
@@ -298,45 +312,74 @@ gi_meanlog = 1.375738
 gi_sdlog = 0.5665299
 p_active_detection = 0.95
 passive_detection_given_symptoms = 0.5
+passive_distribution = get_passive_distribution()
 
 # (this will change as a function of vaccination coverage)
 pr_symptoms = 0.3
-p_passive_detection = passive_detection_given_symptoms * pr_symptoms
+p_passive_detection =  passive_detection_given_symptoms * pr_symptoms
 
-tp_reduction_individual = function(time_to_interview) {
-  tp_multiplier_if_found = plnorm(time_to_interview, gi_meanlog, gi_sdlog)
-  p_found = p_active_detection + p_passive_detection - p_active_detection * p_passive_detection
-  tp_multiplier = 1 + p_found * (tp_multiplier_if_found - 1)
-  tp_reduction = 1 - tp_multiplier
+strategy_samples = lapply(strategy_samples, function(df) {
+  df = df %>%
+    mutate(tracing_delay = samples_isol_swab +
+             test_turnaround_time +
+             time_to_interview)
+})
+
+strategy_isolation = lapply(strategy_samples, function(df) {
+  time_to_isolation(10000,
+                    gi_meanlog,
+                    gi_sdlog,
+                    p_active_detection,
+                    p_passive_detection,
+                    passive_distribution,
+                    df) %>%
+    as_tibble()
+})
+# x = strategy_isolation[[1]]
+# 
+# tp_multiplier = unlist(calculate_tp_multiplier_queue(strategy_isolation[[1]])$tp_multiplier_individual)
+
+tp_reduction = function(df, n=10000) {
+  tp_multiplier_individual = unlist(calculate_tp_multiplier_queue(df)$tp_multiplier_individual)
+  mean_bootstrap = replicate(
+    n,
+    mean(sample(1-tp_multiplier_individual, length(tp_multiplier_individual), replace=TRUE)))
+  mean_bootstrap_quantiles = quantile(mean_bootstrap, c(0.025, 0.975))
+  tibble(mean = 1-mean(tp_multiplier_individual),
+         lower = mean_bootstrap_quantiles[[1]],
+         upper = mean_bootstrap_quantiles[[2]]
+  )
 }
 
 #' Mean estimator using bootstrapping
-tp_reduction = function(df, n=10000) {
-  tp_reduction = tp_reduction_individual(df$time_to_interview)
-  mean_bootstrap = replicate(
-    n,
-    mean(sample(tp_reduction, length(tp_reduction), replace=TRUE)))
-  mean_bootstrap_quantiles = quantile(mean_bootstrap, c(0.025, 0.975))
-  tibble(mean = mean(tp_reduction),
-         lower = mean_bootstrap_quantiles[[1]],
-         upper = mean_bootstrap_quantiles[[2]])
-}
+# tp_reduction = function(df, n=10000) {
+#   tp_reduction = tp_reduction_individual(df$time_to_interview)
+#   mean_bootstrap = replicate(
+#     n,
+#     mean(sample(tp_reduction, length(tp_reduction), replace=TRUE)))
+#   mean_bootstrap_quantiles = quantile(mean_bootstrap, c(0.025, 0.975))
+#   tibble(mean = mean(tp_reduction),
+#          lower = mean_bootstrap_quantiles[[1]],
+#          upper = mean_bootstrap_quantiles[[2]]
+#   )
+# }
 
-strategy_tp = lapply(strategy_samples, tp_reduction) %>%
+strategy_tp = future_lapply(strategy_isolation, tp_reduction, future.seed=T) %>%
   bind_rows(.id = "name")
 
-ggplot(strategy_tp, aes(x=name, y=mean, label=round(mean, 3))) +
+ggplot(strategy_tp, aes(x=name, y=mean, label=round(mean, 2))) +
   geom_col(fill = "steelblue") +
   # geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
   geom_text(vjust = 1, color = "white", nudge_y = -0.005) +
-  coord_cartesian(ylim = c(min(strategy_tp$lower - 0.05), NA)) +
-  labs(title = "Transmission potential reduction",
-       subtitle = "P(Sx) = 0.3, P(Active detect) = 0.95, P(Passive detect|Sx) = 0.5",
+  # coord_cartesian(ylim = c(min(strategy_tp$mean - 0.05), NA)) +
+  coord_cartesian(ylim = c(0, NA)) +
+  labs(title = "Transmission reduction",
+       # subtitle = "P(Sx) = 0.3, P(Active detect) = 0.95, P(Passive detect|Sx) = 0.5",
        x = "Interview queue priority",
        y = "Reduction factor") +
   theme_minimal() +
   theme(panel.grid.major.x = element_blank())
- ggsave("plot3.svg", width=150, height=75, units="mm")
+ggsave("plot3.svg", width=150, height=75, units="mm")
 ```
 
 Kretzschmar method
@@ -363,7 +406,7 @@ kretzschmar_lookup = read.csv("data-public/testing_delay_kretzschmar_table_2_ext
 
 Apply TP reductions to each case
 
-```{r}
+```{r, eval=F}
 kretzschmar_reduction_individual = function(df) {
   df %>%
     # Calculate TP reductions
@@ -422,8 +465,3 @@ bind_rows(Golding = strategy_tp,
 ggsave("plot5.svg", width=150, height=75, units="mm")
 ```
 
-## Invariance to absolute size
-
-```{r}
-
-```
