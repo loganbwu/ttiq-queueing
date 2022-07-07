@@ -15,6 +15,7 @@ library(lubridate)
 library(distributional)
 library(future.apply)
 library(truncdist)
+library(scales)
 plan(multisession)
 z = 1.96
 
@@ -146,7 +147,7 @@ sim_tracing = function(capacity_ratio = 0.8,
                        prop_priority = 0.4,
                        prop_time_delay = 0.2,
                        f_priority = f_priority,
-                       proportion_cases_vaccinated = 0.05,
+                       proportion_cases_vaccinated = 0.45,
                        days_samples = 100,
                        days_burnin = 10,
                        days_burnout = 5,
@@ -255,13 +256,19 @@ strategies = list(
   "Newest swab" = newest_swab,
   "Newest notification" = newest_notification
 )
+capacity_ratios = list(
+  0.2, 0.5, 0.8
+)
 mean_rate = 20
+scenarios = cross(list(strategy = names(strategies),
+                       capacity_ratio = capacity_ratios,
+                       mean_rate = mean_rate))
 
-strategy_samples = future_lapply(strategies, function(f) {
-  sim_tracing(mean_rate = mean_rate,
-              capacity_ratio = 0.8,
-              days_samples = 10000,
-              f_priority = f) %>%
+strategy_samples = future_lapply(scenarios, function(s) {
+  sim_tracing(mean_rate = s$mean_rate,
+              capacity_ratio = s$capacity_ratio,
+              days_samples = 5000,
+              f_priority = strategies[[s$strategy]]) %>%
     mutate(time_to_interview = ifelse(time_to_interview < 0, Inf, time_to_interview))
 },
 future.seed=TRUE)
@@ -277,9 +284,20 @@ strategy_summary = lapply(strategy_samples, function(x) {
            upper = center + band,
            mean_rate = mean_rate)
 })
+# Assign scenario parameters back to summary
+for (i in seq_along(strategy_summary)) {
+  for (j in names(scenarios[[1]])) {
+    strategy_summary[[i]][[j]] = scenarios[[i]][[j]]
+  }
+}
 
-strategy_plot_data = bind_rows(strategy_summary, .id="strategy") %>%
-  mutate(strategy = strategy %>% fct_inorder())
+strategy_plot_data = bind_rows(strategy_summary) %>%
+  mutate(strategy = strategy %>% fct_inorder(),
+         capacity_ratio_label = percent(capacity_ratio, suffix="% capacity"))
+strategy_labels = strategy_plot_data %>%
+  mutate(center = max(center),
+         capacity_ratio = min(capacity_ratio)) %>%
+  distinct(strategy, .keep_all=TRUE)
 xmax = max(strategy_plot_data$time_to_interview[is.finite(strategy_plot_data$time_to_interview)])
 strategy_plot_data$time_to_interview[is.infinite(strategy_plot_data$time_to_interview)] <- xmax + 2
 ggplot(strategy_plot_data,
@@ -287,15 +305,25 @@ ggplot(strategy_plot_data,
            y = center,
            fill = time_to_interview <= xmax)) +
   geom_col() +
+  # geom_text(aes(x=0, y=center, label=strategy, color=NULL, fill=NULL, group=NULL),
+  #           data=strategy_labels, hjust=0, vjust=1, color="grey20", size=3.5, nudge_x=-0.5, nudge_y=-0.05) +
   # geom_errorbar(aes(ymin = lower, ymax=upper), width=0.5) +
-  facet_grid(cols = vars(strategy)) +
+  facet_grid(rows = vars(strategy),
+             cols = vars(capacity_ratio_label),
+             switch = "y") +
   scale_x_continuous(breaks = c(0:xmax, xmax+2), labels=c(0:xmax, "Missed")) +
   theme_minimal() +
   theme(axis.ticks.x = element_blank(),
         axis.ticks.y = element_blank(),
+        # panel.background = element_rect(fill = NA),
         panel.grid.minor = element_blank(),
         panel.grid.major.x = element_blank(),
-        legend.position = "none") +
+        legend.position = "none",
+        strip.background.x = element_rect(fill="grey80", color=NA),
+        strip.background.y = element_rect(fill="grey80", color=NA),
+        strip.placement = "outside"
+        # strip.text.y = element_blank()
+        ) +
   labs(title = "Overall interview delay distributions for prioritisation strategies",
        x = "Overall interview delay (days)",
        y = "Proportion of cases",
@@ -325,7 +353,8 @@ strategy_samples = lapply(strategy_samples, function(df) {
              time_to_interview)
 })
 
-strategy_isolation = lapply(strategy_samples, function(df) {
+strategy_isolation = future_lapply(strategy_samples, function(df) {
+  library(distributional)
   time_to_isolation(10000,
                     gi_meanlog,
                     gi_sdlog,
@@ -334,7 +363,9 @@ strategy_isolation = lapply(strategy_samples, function(df) {
                     passive_distribution,
                     df) %>%
     as_tibble()
-})
+}, future.seed=TRUE)
+
+# isolation_summary = lapply(strategy_isolation, function(x) {sum(is.infinite(x$time_to_passive))})
 # x = strategy_isolation[[1]]
 # 
 # tp_multiplier = unlist(calculate_tp_multiplier_queue(strategy_isolation[[1]])$tp_multiplier_individual)
@@ -364,21 +395,29 @@ tp_reduction = function(df, n=10000) {
 #   )
 # }
 
-strategy_tp = future_lapply(strategy_isolation, tp_reduction, future.seed=T) %>%
-  bind_rows(.id = "name")
+strategy_tp = future_lapply(strategy_isolation, tp_reduction, future.seed=T)
+# Assign scenario parameters back to summary
+for (i in seq_along(strategy_summary)) {
+  for (j in names(scenarios[[1]])) {
+    strategy_tp[[i]][[j]] = scenarios[[i]][[j]]
+  }
+}
+strategy_tp = bind_rows(strategy_tp) %>%
+  mutate(capacity_ratio_label = percent(capacity_ratio, suffix="% capacity"),
+         strategy = strategy %>% str_replace(" ", "\n"))
 
-ggplot(strategy_tp, aes(x=name, y=mean, label=round(mean, 2))) +
+ggplot(strategy_tp, aes(y=strategy, x=mean, label=round(mean, 2))) +
   geom_col(fill = "steelblue") +
   # geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
-  geom_text(vjust = 1, color = "white", nudge_y = -0.005) +
-  # coord_cartesian(ylim = c(min(strategy_tp$mean - 0.05), NA)) +
-  coord_cartesian(ylim = c(0, NA)) +
+  geom_text(hjust=1, vjust = 0.5, color = "white", nudge_x = -0.005) +
+  facet_grid(cols = vars(capacity_ratio_label)) +
   labs(title = "Transmission reduction",
-       # subtitle = "P(Sx) = 0.3, P(Active detect) = 0.95, P(Passive detect|Sx) = 0.5",
        x = "Interview queue priority",
        y = "Reduction factor") +
   theme_minimal() +
-  theme(panel.grid.major.x = element_blank())
+  theme(strip.background.x = element_rect(fill="grey80", color=NA),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank())
 ggsave("plot3.svg", width=150, height=75, units="mm")
 ```
 

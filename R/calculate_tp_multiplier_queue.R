@@ -7,7 +7,7 @@
 #' @return
 #' @author Nick Golding
 #' @export
-calculate_tp_multiplier_queue <- function(scenario_df_run_queue, ve_onward=NULL) {
+calculate_tp_multiplier_queue <- function(scenario_df_run_queue, ve_onward=0.639) {
 
   scenario_df_run_queue %>%
     rowwise() %>%
@@ -22,7 +22,7 @@ calculate_tp_multiplier_queue <- function(scenario_df_run_queue, ve_onward=NULL)
       tp_multiplier_if_found_individual = plnorm(time_to_isolation_sims,
                                                  meanlog = gi_meanlog,
                                                  sdlog = gi_sdlog),
-      fraction_extra_cases_missed = 0.2# mean(person_missed)
+      fraction_extra_cases_missed = mean(person_missed)
     ) %>%
     # adjust tp multiplier for the probability of missing a case entirely
     
@@ -34,8 +34,8 @@ calculate_tp_multiplier_queue <- function(scenario_df_run_queue, ve_onward=NULL)
       p_passive_detection_corrected = p_passive_detection * fraction_extra_cases_missed,
       p_missed = list((1 - p_active_detection_corrected) * (1 - p_passive_detection_corrected)),
       # adjust for the vaccinated cases
-      # vaccination_multiplier = list(ifelse(samples$vaccinated, 1 - ve_onward, 1)),
-      vaccination_multiplier = 1,
+      vaccination_multiplier = list(ifelse(vaccinated!="None", 1 - ve_onward, 1)),
+      # vaccination_multiplier = 1,
       tp_multiplier_individual = list((tp_multiplier_if_found_individual * (1 - p_missed) + 1 * p_missed) * vaccination_multiplier),
       tp_multiplier = mean(tp_multiplier_individual),
       tp_multiplier_if_found = mean(tp_multiplier_if_found_individual)

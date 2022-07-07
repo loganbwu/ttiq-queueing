@@ -116,7 +116,8 @@ time_to_isolation <- function(n_iterations,
       time_to_isolation_sims = trace_object_infect_isolate,
       time_to_active = trace_object_time_to_active,
       time_to_passive = trace_object_time_to_passive,
-      person_missed = trace_object_person_missed
+      person_missed = trace_object_person_missed,
+      vaccinated = resampled$vaccinated
     )
   )
   
