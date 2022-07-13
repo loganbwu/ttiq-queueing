@@ -216,7 +216,7 @@ samples_list = future_lapply(mean_rates, function(x) {
   print(x)
   sim_tracing(mean_rate = x,
               f_priority = random_swab,
-              days_samples = 1000) %>%
+              days_samples = 10000) %>%
     count(time_to_interview) %>%
     mutate(p = n / sum(n),
            center = (n + 0.5*z^2) / (sum(n) + z^2),
@@ -267,7 +267,7 @@ scenarios = cross(list(strategy = names(strategies),
 strategy_samples = future_lapply(scenarios, function(s) {
   sim_tracing(mean_rate = s$mean_rate,
               capacity_ratio = s$capacity_ratio,
-              days_samples = 5000,
+              days_samples = 1000,
               f_priority = strategies[[s$strategy]]) %>%
     mutate(time_to_interview = ifelse(time_to_interview < 0, Inf, time_to_interview))
 },
@@ -324,11 +324,11 @@ ggplot(strategy_plot_data,
         strip.placement = "outside"
         # strip.text.y = element_blank()
         ) +
-  labs(title = "Overall interview delay distributions for prioritisation strategies",
-       x = "Overall interview delay (days)",
+  labs(title = "Interview delay distributions for prioritisation strategies",
+       x = "Interview delay (days)",
        y = "Proportion of cases",
        fill = "Interviewed\n(to show NAs)")
-ggsave("plot2.svg", width=150, height=75, units="mm")
+ggsave("plot2.svg", width=150, height=150, units="mm")
 ```
 
 # TP reduction
@@ -404,20 +404,21 @@ for (i in seq_along(strategy_summary)) {
 }
 strategy_tp = bind_rows(strategy_tp) %>%
   mutate(capacity_ratio_label = percent(capacity_ratio, suffix="% capacity"),
-         strategy = strategy %>% str_replace(" ", "\n"))
+         strategy = strategy %>% str_replace(" ", "\n") %>% fct_rev())
 
-ggplot(strategy_tp, aes(y=strategy, x=mean, label=round(mean, 2))) +
+ggplot(strategy_tp, aes(x=strategy, y=mean, label=percent_format(accuracy=1)(mean))) +
   geom_col(fill = "steelblue") +
   # geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
-  geom_text(hjust=1, vjust = 0.5, color = "white", nudge_x = -0.005) +
+  geom_text(hjust=0.5, vjust = 1, color = "white", nudge_y = -0.005) +
   facet_grid(cols = vars(capacity_ratio_label)) +
-  labs(title = "Transmission reduction",
-       x = "Interview queue priority",
+  scale_y_continuous(labels = scales::percent_format()) +
+  # coord_flip() +
+  labs(x = NULL,
        y = "Reduction factor") +
   theme_minimal() +
   theme(strip.background.x = element_rect(fill="grey80", color=NA),
-        panel.grid.major.y = element_blank(),
-        panel.grid.minor.y = element_blank())
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
 ggsave("plot3.svg", width=150, height=75, units="mm")
 ```
 
