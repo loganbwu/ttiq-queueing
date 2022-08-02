@@ -84,8 +84,7 @@ oldest_swab = function(x) {
       # Whether case is eligible to be interviewed
       desc(eligible_for_interview),
       # Priorities, in order of appearance
-      swab_date, # oldest first
-      vaccinated # vaccinated FALSE first
+      swab_date # oldest first
     )
 }
 
@@ -95,8 +94,7 @@ newest_swab = function(x) {
       # Whether case is eligible to be interviewed
       desc(eligible_for_interview),
       # Priorities, in order of appearance
-      desc(swab_date), # newest first
-      vaccinated # vaccinated FALSE first
+      desc(swab_date) # newest first
     )
 }
 
@@ -106,8 +104,8 @@ newest_notification = function(x) {
       # Whether case is eligible to be interviewed
       desc(eligible_for_interview),
       # Priorities, in order of appearance
-      desc(notification_date), # newest first
-      vaccinated # vaccinated FALSE first
+      desc(notification_date)#, # newest first
+      # vaccinated # vaccinated FALSE first
     )
 }
 
@@ -122,6 +120,17 @@ random_swab <- function(x) {
     ) %>%
     select(-ix)
 }
+
+new_swab_vaccine <- function(x, sim_day, notification_time) {
+    x %>%
+      arrange(
+        # Whether case is eligible to be interviewed
+        desc(eligible_for_interview),
+        # Priorities, in order of appearance
+        desc(swab_date), # newest first
+        vaccinated # vaccinated FALSE first
+      )
+  }
 ```
 
 Create a dataframe representing the linelist and process the queue day by day.
@@ -152,6 +161,7 @@ sim_tracing = function(capacity_ratio = 0.8,
                        days_burnin = 10,
                        days_burnout = 5,
                        mean_rate = 20) {
+  # print("Executing...")
   n_samples = days_samples * mean_rate
   n_burnin = days_burnin * mean_rate
   n_burnout = days_burnout * mean_rate
@@ -185,7 +195,7 @@ sim_tracing = function(capacity_ratio = 0.8,
     samples = samples %>%
       mutate(eligible_for_interview = notification_date <= sim_day & # Notification has happened
                is.na(interview_date) & # Hasn't been interviewed already
-               swab_date >= (sim_day-max_interview_delay) & # Notification hasn't expired
+               notification_date >= (sim_day-max_interview_delay) & # Notification hasn't expired
                !(notification_date==sim_day & notification_time < prop_time_delay)) %>%
       # Sort by priority function
       f_priority() %>%
@@ -202,7 +212,7 @@ sim_tracing = function(capacity_ratio = 0.8,
       samples_isol_swab = rpois(n(), 1),
       vaccinated = ifelse(vaccinated, "Pfizer", "None"),
       test_turnaround_time = notification_date - swab_date,
-      time_to_interview = replace_na(interview_date - swab_date, Inf)
+      time_to_interview = replace_na(interview_date - notification_date, Inf)
     )
 }
 ```
@@ -253,8 +263,9 @@ ggsave("plot1.svg", width=150, height=75, units="mm")
 strategies = list(
   "Random" = random_swab,
   "Oldest swab" = oldest_swab,
+  "Newest notification" = newest_notification,
   "Newest swab" = newest_swab,
-  "Newest notification" = newest_notification
+  "Newest swab then unvaccinated" = new_swab_vaccine
 )
 capacity_ratios = list(
   0.2, 0.5, 0.8
@@ -267,7 +278,7 @@ scenarios = cross(list(strategy = names(strategies),
 strategy_samples = future_lapply(scenarios, function(s) {
   sim_tracing(mean_rate = s$mean_rate,
               capacity_ratio = s$capacity_ratio,
-              days_samples = 1000,
+              days_samples = 10000,
               f_priority = strategies[[s$strategy]]) %>%
     mutate(time_to_interview = ifelse(time_to_interview < 0, Inf, time_to_interview))
 },
@@ -292,7 +303,7 @@ for (i in seq_along(strategy_summary)) {
 }
 
 strategy_plot_data = bind_rows(strategy_summary) %>%
-  mutate(strategy = strategy %>% fct_inorder(),
+  mutate(strategy = strategy %>% str_replace("n u", "n\nu") %>% fct_inorder(),
          capacity_ratio_label = percent(capacity_ratio, suffix="% capacity"))
 strategy_labels = strategy_plot_data %>%
   mutate(center = max(center),
@@ -312,6 +323,7 @@ ggplot(strategy_plot_data,
              cols = vars(capacity_ratio_label),
              switch = "y") +
   scale_x_continuous(breaks = c(0:xmax, xmax+2), labels=c(0:xmax, "Missed")) +
+  scale_y_continuous(labels=percent_format()) +
   theme_minimal() +
   theme(axis.ticks.x = element_blank(),
         axis.ticks.y = element_blank(),
@@ -325,10 +337,10 @@ ggplot(strategy_plot_data,
         # strip.text.y = element_blank()
         ) +
   labs(title = "Interview delay distributions for prioritisation strategies",
-       x = "Interview delay (days)",
+       x = "Interview delay (days from notification to interview)",
        y = "Proportion of cases",
        fill = "Interviewed\n(to show NAs)")
-ggsave("plot2.svg", width=150, height=150, units="mm")
+ggsave("plot2.svg", width=150, height=200, units="mm")
 ```
 
 # TP reduction
@@ -404,21 +416,22 @@ for (i in seq_along(strategy_summary)) {
 }
 strategy_tp = bind_rows(strategy_tp) %>%
   mutate(capacity_ratio_label = percent(capacity_ratio, suffix="% capacity"),
-         strategy = strategy %>% str_replace(" ", "\n") %>% fct_rev())
+         strategy = strategy %>% str_replace(" (?!.* )", "\n") %>% fct_inorder())
 
 ggplot(strategy_tp, aes(x=strategy, y=mean, label=percent_format(accuracy=1)(mean))) +
   geom_col(fill = "steelblue") +
   # geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
-  geom_text(hjust=0.5, vjust = 1, color = "white", nudge_y = -0.005) +
+  geom_text(hjust=0.5, vjust = 1, color = "white", nudge_y = -0.005, size=3) +
   facet_grid(cols = vars(capacity_ratio_label)) +
   scale_y_continuous(labels = scales::percent_format()) +
   # coord_flip() +
   labs(x = NULL,
-       y = "Reduction factor") +
+       y = "Reduction in transmission") +
   theme_minimal() +
   theme(strip.background.x = element_rect(fill="grey80", color=NA),
         panel.grid.major.x = element_blank(),
-        panel.grid.minor.x = element_blank())
+        panel.grid.minor.x = element_blank(),
+        axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
 ggsave("plot3.svg", width=150, height=75, units="mm")
 ```
 
