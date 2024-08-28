@@ -68,6 +68,13 @@ if (length(linelist_file) == 1) {
 ```
 
 
+Read in the empirical notification delay
+
+```{r}
+# notification_delays = read_csv("notification_delays.csv")
+test_turnaround_time = read_csv("data-public/test_turnaround_time.csv")
+```
+
 Define our priority functions.
 
 ```{r}
@@ -122,15 +129,15 @@ random_swab <- function(x) {
 }
 
 new_swab_vaccine <- function(x, sim_day, notification_time) {
-    x %>%
-      arrange(
-        # Whether case is eligible to be interviewed
-        desc(eligible_for_interview),
-        # Priorities, in order of appearance
-        desc(swab_date), # newest first
-        vaccinated # vaccinated FALSE first
-      )
-  }
+  x %>%
+    arrange(
+      # Whether case is eligible to be interviewed
+      desc(eligible_for_interview),
+      # Priorities, in order of appearance
+      desc(swab_date), # newest first
+      vaccinated # vaccinated FALSE first
+    )
+}
 ```
 
 Create a dataframe representing the linelist and process the queue day by day.
@@ -173,7 +180,9 @@ sim_tracing = function(capacity_ratio = 0.8,
     i = 1
     while (length(swab_date) < (n)) {
       # swab_date = c(swab_date, rep(i, rpois(1, mean_rate)))
-      swab_date = c(swab_date, rep(i, rnbinom(1, mu=mean_rate, size=mean_rate)))
+      # Size parameter multiplier taken from Queue_Parameters.Rmd
+      # swab_date = c(swab_date, rep(i, rnbinom(1, mu=mean_rate, size=mean_rate)))
+      swab_date = c(swab_date, rep(i, rpois(1, lambda=mean_rate)))
       i = i + 1
     }
     swab_date = swab_date[seq_len(n)]
@@ -182,7 +191,11 @@ sim_tracing = function(capacity_ratio = 0.8,
   # Initialise population
   samples = tibble(
     swab_date = create_swab_date(n_burnin+n_samples+n_burnout, mean_rate),
-    notification_date = swab_date + pmin(rpois(n_burnin + n_samples + n_burnout, 1), 8),
+    # notification_date = swab_date + pmin(rpois(n_burnin + n_samples + n_burnout, 1.5), 8),
+    notification_date = swab_date + sample(x = test_turnaround_time$x,
+                                           size = n_burnin + n_samples + n_burnout,
+                                           replace = TRUE,
+                                           prob = test_turnaround_time$p),
     notification_time = runif(n_burnin + n_samples + n_burnout),
     vaccinated = runif(n_burnin + n_samples + n_burnout) <= proportion_cases_vaccinated,
     interview_date = NA_integer_
@@ -219,42 +232,61 @@ sim_tracing = function(capacity_ratio = 0.8,
 
 Execute sim_tracing function convergence test
 
-```{r, eval=F}
-mean_rates = c(10, 100, 1000, 10000)
-
-samples_list = future_lapply(mean_rates, function(x) {
-  print(x)
-  sim_tracing(mean_rate = x,
-              f_priority = random_swab,
-              days_samples = 10000) %>%
-    count(time_to_interview) %>%
-    mutate(p = n / sum(n),
-           center = (n + 0.5*z^2) / (sum(n) + z^2),
-           n = as.double(n),
-           band = (z / (sum(n) + z^2)) * sqrt((n * (sum(n)-n)) / sum(n) + z^2/4),
-           lower = center - band,
-           upper = center + band,
-           mean_rate = x)
-})
+```{r, eval=T}
+mean_rates = c(10, 20, 50, 100, 500, 1000)
+capacities = c(0.2, 0.5, 0.8)
+combinations = expand_grid(rate=mean_rates, capacity=capacities)
+library(pbmcapply)
+samples_list = pbmclapply(seq_len(nrow(combinations)),
+                          function(i) {
+                            rate = combinations$rate[i]
+                            capacity = combinations$capacity[i]
+                            sim_tracing(capacity_ratio = capacity,
+                                        mean_rate = rate,
+                                        f_priority = random_swab,
+                                        days_samples = 1000) %>%
+                              count(time_to_interview) %>%
+                              mutate(p = n / sum(n),
+                                     center = (n + 0.5*z^2) / (sum(n) + z^2),
+                                     n = as.double(n),
+                                     band = (z / (sum(n) + z^2)) * sqrt((n * (sum(n)-n)) / sum(n) + z^2/4),
+                                     lower = center - band,
+                                     upper = center + band,
+                                     mean_rate = rate,
+                                     capacity = capacity)
+                          },
+                          mc.cores = min(8, nrow(combinations)))
 samples_list.2 = samples_list %>%
-  bind_rows()
+  bind_rows() %>%
+  mutate(mean_rate = factor(mean_rate),
+         capacity = paste("Capacity ratio =", capacity))
 
-xmax = max(samples_list.2$time_to_interview)
+xmax = max(samples_list.2$time_to_interview[is.finite(samples_list.2$time_to_interview)])
+samples_list.2$time_to_interview[samples_list.2$time_to_interview==Inf] = xmax+2
+
+# cc = scales::seq_gradient_pal("navy", "tomato")(seq(0,1,length.out=length(mean_rates)))
+
 samples_list.2 %>%
-  ggplot(aes(x = time_to_interview, y = p, color = mean_rate, group = mean_rate)) +
+  ggplot(aes(x = time_to_interview, y = p, color = mean_rate, fill = mean_rate)) +
   geom_errorbar(aes(ymin = lower, ymax=upper), position=position_dodge(0.5)) +
   geom_point(position = position_dodge(0.5)) +
-  scale_color_gradient(trans = "log", breaks=mean_rates, labels=scales::comma) +
-  scale_x_continuous(breaks = c(-2, 0:xmax), labels=c("Missed", 0:xmax)) +
-  theme_minimal() +
+  facet_wrap(vars(capacity), ncol=1) +
+  # scale_color_continuous(trans = "log", breaks=mean_rates, labels=scales::comma) +
+  # scale_color_manual(values = cc) +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_color_brewer(palette = "Dark2") +
+  scale_x_continuous(breaks = c(0:xmax, xmax+2), labels=c(0:xmax, "Missed")) +
+  # theme_minimal() +
   theme(axis.ticks.x = element_blank(),
         axis.ticks.y = element_blank(),
         panel.grid.minor = element_blank()) +
-  labs(title = "Convergence with capacity ratio = 0.5 \u00D7 mean rate",
+  labs(title = "Inspection of delay invariance",
+       subtitle = "with respect to incoming case rate, using the random prioritisation strategy",
        x = "Overall interview delay (days)",
        y = "Proportion of cases",
-       color = "Mean rate")
-ggsave("plot1.svg", width=150, height=75, units="mm")
+       color = "Mean case\nrate",
+       fill = "Mean case\nrate")
+ggsave("plot1.svg", width=150, height=150, units="mm")
 ```
 
 # Run experiments
@@ -278,7 +310,7 @@ scenarios = cross(list(strategy = names(strategies),
 strategy_samples = future_lapply(scenarios, function(s) {
   sim_tracing(mean_rate = s$mean_rate,
               capacity_ratio = s$capacity_ratio,
-              days_samples = 10000,
+              days_samples = 1000,
               f_priority = strategies[[s$strategy]]) %>%
     mutate(time_to_interview = ifelse(time_to_interview < 0, Inf, time_to_interview))
 },
@@ -335,7 +367,7 @@ ggplot(strategy_plot_data,
         strip.background.y = element_rect(fill="grey80", color=NA),
         strip.placement = "outside"
         # strip.text.y = element_blank()
-        ) +
+  ) +
   labs(title = "Interview delay distributions for prioritisation strategies",
        x = "Interview delay (days from notification to interview)",
        y = "Proportion of cases",

@@ -1,0 +1,195 @@
+---
+title: "Queue TP Reduction"
+author: "Logan Wu"
+date: "`r format(lubridate::today(), '%B %e, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(patchwork)
+library(readxl)
+library(lubridate)
+library(distributional)
+library(future.apply)
+library(truncdist)
+library(scales)
+library(janitor)
+library(patchwork)
+plan(multisession)
+z = 1.96
+
+for(x in list.files("R", full.names=T)) {source(x)}
+```
+
+This RMarkdown illustrates the effectiveness of queueing strategy on transmission potential (TP) reduction in a contact tracing context.
+
+```{r}
+data_dir = "data"
+VIC = read_cases_vic(file.path(data_dir, "Linelist_Cases_20210917.xlsx")) %>%
+  rename(swab_date = earliest_detected,
+         notification_date = earliest_confirmed_or_probable,
+         interview_date = interviewed_date)
+NSW = read_cases_nsw(file.path(data_dir, "CASES_FROM_20200701_0000_TO_20210913_1115.xlsx")) %>%
+  rename(swab_date = earliest_detected,
+         notification_date = earliest_confirmed_or_probable,
+         interview_date = interviewed_date)
+```
+
+# Incoming cases
+
+Calculate parameters for NB(r, mu)
+
+```{r}
+window_width = 14
+NSW_optimal = NSW %>%
+  count(notification_date) %>%
+  mutate(moving_average = zoo::rollapply(n, window_width, mean, align="center", fill=NA)) %>%
+  filter(notification_date >= as.Date("2020-07-01"),
+         notification_date <= as.Date("2021-01-31")) %>%
+  drop_na(moving_average)
+
+likelihood_fn = function(r) {
+  ll = sapply(seq_len(nrow(NSW_optimal)), function(i) {
+    mean = NSW_optimal$moving_average[i]
+    actual = NSW_optimal$n[i]
+    dnbinom(actual, size=r, mu=mean, log=T)
+  })
+  sum(ll)
+}
+
+max_likelihood = optim(1000, likelihood_fn, lower=1e-6, method="L-BFGS-B")
+
+size = max_likelihood$par
+print(paste("Size:", size))
+NSW_optimal_banded = NSW_optimal
+alpha1 = 0.05
+alpha2 = 0.5
+NSW_optimal_banded$lower1 = sapply(NSW_optimal_banded$moving_average, function(x) {qnbinom(alpha1/2, size=size, mu=x)})
+NSW_optimal_banded$upper1 = sapply(NSW_optimal_banded$moving_average, function(x) {qnbinom(1-alpha1/2, size=size, mu=x)})
+NSW_optimal_banded$lower2 = sapply(NSW_optimal_banded$moving_average, function(x) {qnbinom(alpha2/2, size=size, mu=x)})
+NSW_optimal_banded$upper2 = sapply(NSW_optimal_banded$moving_average, function(x) {qnbinom(1-alpha2/2, size=size, mu=x)})
+NSW_optimal_banded$lower3 = sapply(NSW_optimal_banded$moving_average, function(x) {qpois(alpha1/2, lambda=x)})
+NSW_optimal_banded$upper3 = sapply(NSW_optimal_banded$moving_average, function(x) {qpois(1-alpha1/2, lambda=x)})
+NSW_optimal_banded$lower4 = sapply(NSW_optimal_banded$moving_average, function(x) {qpois(alpha2/2, lambda=x)})
+NSW_optimal_banded$upper4 = sapply(NSW_optimal_banded$moving_average, function(x) {qpois(1-alpha2/2, lambda=x)})
+# mutate(lower = qnbinom(0.25, size=size, mu=moving_average),
+#        upper = qnbinom(0.75, size=size, mu=moving_average))
+
+p1 = ggplot(NSW_optimal_banded, aes(x=notification_date, y=moving_average)) +
+  geom_ribbon(aes(ymin=lower1, ymax=upper1, fill="95%"), alpha=0.3, fill="steelblue") +
+  geom_ribbon(aes(ymin=lower2, ymax=upper2, fill="50%"), alpha=0.9, fill="steelblue") +
+  geom_line() +
+  geom_point(aes(y=n), alpha=0.5, size=1) +
+  scale_x_date(date_labels = "%b %Y") +
+  labs(subtitle = paste0("X ~ Neg. Binomial(μ(t), r=", round(size), ")"),
+       x = "Notification date", y = "Cases")
+p2 = ggplot(NSW_optimal_banded, aes(x=notification_date, y=moving_average)) +
+  geom_ribbon(aes(ymin=lower3, ymax=upper3, fill="95%"), alpha=0.3, fill="tomato") +
+  geom_ribbon(aes(ymin=lower4, ymax=upper4, fill="50%"), alpha=0.9, fill="tomato") +
+  geom_line() +
+  geom_point(aes(y=n), alpha=0.5, size=1) +
+  scale_x_date(date_labels = "%b %Y") +
+  labs(subtitle = paste("X ~ Poisson(μ(t))"),
+       x = "Notification date", y = "Cases")
+p1 + p2 +
+  plot_layout(guides="collect") +
+  plot_annotation(title="Maximum-Likelihood Fit for New South Wales",
+                  subtitle=paste0("μ(t) is a ", window_width, "-day moving average"))
+
+ggsave("plot4.svg", width=150, height=75, units="mm")
+```
+
+# Investigate notification delays
+
+```{r}
+linelist = bind_rows(VIC, NSW, .id="State") %>%
+  mutate(notification_delay = notification_date - swab_date,
+         State = ifelse(State=="1", "VIC", "NSW")) %>%
+  filter(notification_date >= as.Date("2020-07-01"),
+         notification_date <= as.Date("2021-09-30"))
+```
+
+Delays over time
+
+```{r}
+max_delay = 8
+p1 = linelist %>%
+  arrange(notification_date) %>%
+  mutate(yearmonth = format(notification_date, "%b %Y"),
+         yearmonth = fct_inorder(yearmonth)) %>%
+  count(yearmonth, notification_delay, State) %>%
+  filter(notification_delay >= 0,
+         notification_delay < max_delay) %>%
+  group_by(yearmonth) %>%
+  mutate(p = n / sum(n)) %>%
+  ggplot(aes(x = notification_delay, y = p, fill = State)) +
+  geom_col() +
+  scale_fill_brewer(palette = "Set2") +
+  facet_wrap(~yearmonth) +
+  labs(subtitle = "Notification delays for cases by month",
+       x = NULL, y = "Proportion") +
+  theme(legend.position = "none")
+
+p2 = linelist %>%
+  count(notification_delay, State) %>%
+  filter(notification_delay >= 0,
+         notification_delay < max_delay) %>%
+  mutate(p = n / sum(n)) %>%
+  ggplot(aes(x = notification_delay, y = p, fill = State)) +
+  geom_col() +
+  scale_fill_brewer(palette = "Set2") +
+  labs(subtitle = "For all cases from July 2020 to September 2021",
+       x = "Notification delay", y = NULL) +
+  theme(legend.position = "bottom")
+
+p1 / p2 + plot_layout(heights = c(3, 1))
+ggsave("plot7.svg", width=150, height=150, units="mm")
+```
+
+Delays in the whole period
+
+```{r}
+delays = linelist %>%
+  count(notification_delay) %>%
+  mutate(notification_delay = as.integer(notification_delay),
+         p = n / sum(n))
+fit = delays %>%
+  filter(notification_delay >= 0, notification_delay <= 8) %>%
+  # group_by(State) %>%
+  summarise(notification_delay = weighted.mean(notification_delay, n, na.rm=T),
+            weight = sum(n))
+mean_notification_delay_from_data = weighted.mean(fit$notification_delay, fit$weight)
+fit_distribution = tibble(notification_delay = 0:8,
+                          p = dpois(notification_delay, mean_notification_delay_from_data))
+
+ggplot(delays, aes(x = notification_delay, y = p)) +
+  geom_col() +
+  geom_line(data=fit_distribution) +
+  # geom_vline(data=fit, aes(xintercept=notification_delay)) +
+  # facet_wrap(vars(State), scales = "free_y") +
+  coord_cartesian(xlim = c(0, 5))
+```
+
+Write delays to a list to be read by the queue TP reduction RMD
+
+```{r}
+delays %>%
+  filter(notification_delay >= 0,
+         notification_delay < 14) %>%
+  write_csv("notification_delays.csv")
+```
+
+# Investigate notification clustering
+
+How many cases are reported per day
+
+```{r}
+notified = linelist %>%
+  count(State, notification_date)
+
+ggplot(notified, aes(x = notification_date, y = n, color = State)) +
+  geom_line()
+```

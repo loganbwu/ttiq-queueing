@@ -1,0 +1,3 @@
+scenario,priority_type,priority_growth_rate,capacity,max,capacity_ratio,tracing_delay,vaccinated,priority,samples_isol_swab,samples_test_turnaround_time,samples_time_to_interview
+optimal_priority_vaccine_new_swab_delay_zero_capacity70pc_max_5d,priority_vaccine_new_swab,delay_zero,capacity70pc,max_5d,0.7,5,TRUE,TRUE,2,2,1
+optimal_priority_vaccine_new_swab_delay_zero_capacity70pc_max_5d,priority_vaccine_new_swab,delay_zero,capacity70pc,max_5d,0.7,2,TRUE,FALSE,0,1,1
