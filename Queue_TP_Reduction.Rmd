@@ -167,7 +167,8 @@ sim_tracing = function(capacity_ratio = 0.8,
                        days_samples = 100,
                        days_burnin = 10,
                        days_burnout = 5,
-                       mean_rate = 20) {
+                       mean_rate = 20,
+                       negbin_size = 99999) {
   # print("Executing...")
   n_samples = days_samples * mean_rate
   n_burnin = days_burnin * mean_rate
@@ -180,9 +181,9 @@ sim_tracing = function(capacity_ratio = 0.8,
     i = 1
     while (length(swab_date) < (n)) {
       # swab_date = c(swab_date, rep(i, rpois(1, mean_rate)))
-      # Size parameter multiplier taken from Queue_Parameters.Rmd
-      # swab_date = c(swab_date, rep(i, rnbinom(1, mu=mean_rate, size=mean_rate)))
-      swab_date = c(swab_date, rep(i, rpois(1, lambda=mean_rate)))
+      # Size parameter multiplier can be taken from Queue_Parameters.Rmd
+      swab_date = c(swab_date, rep(i, rnbinom(1, mu=mean_rate, size=negbin_size)))
+      # swab_date = c(swab_date, rep(i, rpois(1, lambda=mean_rate)))
       i = i + 1
     }
     swab_date = swab_date[seq_len(n)]
@@ -299,19 +300,27 @@ strategies = list(
   "Newest swab" = newest_swab,
   "Newest swab then unvaccinated" = new_swab_vaccine
 )
-capacity_ratios = list(
+mean_rates = 20
+capacity_ratios = c(
   0.2, 0.5, 0.8
 )
-mean_rate = 20
+negbin_sizes = c(1, 10, 100)
+# scenarios = expand_grid(mean_rate=mean_rates,
+#                         capacity_ratio=capacity_ratios,
+#                         negbin_size=negbin_sizes,
+#                         strategy = names(strategies))
+
 scenarios = cross(list(strategy = names(strategies),
                        capacity_ratio = capacity_ratios,
-                       mean_rate = mean_rate))
+                       negbin_size=negbin_sizes,
+                       mean_rate = mean_rates))
 
 strategy_samples = future_lapply(scenarios, function(s) {
   sim_tracing(mean_rate = s$mean_rate,
               capacity_ratio = s$capacity_ratio,
               days_samples = 1000,
-              f_priority = strategies[[s$strategy]]) %>%
+              f_priority = strategies[[s$strategy]],
+              negbin_size = s$negbin_size) %>%
     mutate(time_to_interview = ifelse(time_to_interview < 0, Inf, time_to_interview))
 },
 future.seed=TRUE)
@@ -324,8 +333,7 @@ strategy_summary = lapply(strategy_samples, function(x) {
            n = as.double(n),
            band = (z / (sum(n) + z^2)) * sqrt((n * (sum(n)-n)) / sum(n) + z^2/4),
            lower = center - band,
-           upper = center + band,
-           mean_rate = mean_rate)
+           upper = center + band)
 })
 # Assign scenario parameters back to summary
 for (i in seq_along(strategy_summary)) {
@@ -336,7 +344,8 @@ for (i in seq_along(strategy_summary)) {
 
 strategy_plot_data = bind_rows(strategy_summary) %>%
   mutate(strategy = strategy %>% str_replace("n u", "n\nu") %>% fct_inorder(),
-         capacity_ratio_label = percent(capacity_ratio, suffix="% capacity"))
+         capacity_ratio_label = percent(capacity_ratio, suffix="% capacity")) %>% 
+  filter(negbin_size==10) # select one of these for results, use the rest in sensitivity analysis
 strategy_labels = strategy_plot_data %>%
   mutate(center = max(center),
          capacity_ratio = min(capacity_ratio)) %>%
@@ -448,13 +457,16 @@ for (i in seq_along(strategy_summary)) {
 }
 strategy_tp = bind_rows(strategy_tp) %>%
   mutate(capacity_ratio_label = percent(capacity_ratio, suffix="% capacity"),
+         size_label = paste0("size=", negbin_size),
          strategy = strategy %>% str_replace(" (?!.* )", "\n") %>% fct_inorder())
 
-ggplot(strategy_tp, aes(x=strategy, y=mean, label=percent_format(accuracy=1)(mean))) +
+ggplot(strategy_tp %>%
+         filter(negbin_size==10), aes(x=strategy, y=mean, label=percent_format(accuracy=1)(mean))) +
   geom_col(fill = "steelblue") +
   # geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
   geom_text(hjust=0.5, vjust = 1, color = "white", nudge_y = -0.005, size=3) +
-  facet_grid(cols = vars(capacity_ratio_label)) +
+  facet_grid(cols = vars(capacity_ratio_label),
+             rows = vars(size_label)) +
   scale_y_continuous(labels = scales::percent_format()) +
   # coord_flip() +
   labs(x = NULL,
@@ -463,8 +475,31 @@ ggplot(strategy_tp, aes(x=strategy, y=mean, label=percent_format(accuracy=1)(mea
   theme(strip.background.x = element_rect(fill="grey80", color=NA),
         panel.grid.major.x = element_blank(),
         panel.grid.minor.x = element_blank(),
+        strip.background.y = element_rect(fill="grey80", color=NA),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
         axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
 ggsave("plot3.svg", width=150, height=75, units="mm")
+
+ggplot(strategy_tp, aes(x=strategy, y=mean, label=percent_format(accuracy=1)(mean))) +
+  geom_col(fill = "steelblue") +
+  # geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
+  geom_text(hjust=0.5, vjust = 1, color = "white", nudge_y = -0.005, size=3) +
+  facet_grid(cols = vars(capacity_ratio_label),
+             rows = vars(size_label)) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  # coord_flip() +
+  labs(x = NULL,
+       y = "Reduction in transmission") +
+  theme_minimal() +
+  theme(strip.background.x = element_rect(fill="grey80", color=NA),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.background.y = element_rect(fill="grey80", color=NA),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+ggsave("plot3_appendix.svg", width=150, height=75, units="mm")
 ```
 
 Kretzschmar method
