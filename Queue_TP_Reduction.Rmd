@@ -318,7 +318,7 @@ scenarios = cross(list(strategy = names(strategies),
 strategy_samples = future_lapply(scenarios, function(s) {
   sim_tracing(mean_rate = s$mean_rate,
               capacity_ratio = s$capacity_ratio,
-              days_samples = 1000,
+              days_samples = 6000, # change this one to increase sample size in the results. 1000 is reasonably quick. 10000 encounters scaling issues.
               f_priority = strategies[[s$strategy]],
               negbin_size = s$negbin_size) %>%
     mutate(time_to_interview = ifelse(time_to_interview < 0, Inf, time_to_interview))
@@ -361,9 +361,8 @@ ggplot(strategy_plot_data,
   #           data=strategy_labels, hjust=0, vjust=1, color="grey20", size=3.5, nudge_x=-0.5, nudge_y=-0.05) +
   # geom_errorbar(aes(ymin = lower, ymax=upper), width=0.5) +
   facet_grid(rows = vars(strategy),
-             cols = vars(capacity_ratio_label),
-             switch = "y") +
-  scale_x_continuous(breaks = c(0:xmax, xmax+2), labels=c(0:xmax, "Missed")) +
+             cols = vars(capacity_ratio_label)) +
+  scale_x_continuous(breaks = c(0:xmax, xmax+2), labels=c(0:xmax, "Missed\n>5 days")) +
   scale_y_continuous(labels=percent_format()) +
   theme_minimal() +
   theme(axis.ticks.x = element_blank(),
@@ -378,10 +377,10 @@ ggplot(strategy_plot_data,
         # strip.text.y = element_blank()
   ) +
   labs(title = "Interview delay distributions for prioritisation strategies",
-       x = "Interview delay (days from notification to interview)",
+       x = "Days delayed from notification to interview",
        y = "Proportion of cases",
        fill = "Interviewed\n(to show NAs)")
-ggsave("plot2.svg", width=150, height=200, units="mm")
+ggsave("plot2.png", width=150, height=200, units="mm")
 ```
 
 # TP reduction
@@ -465,8 +464,7 @@ ggplot(strategy_tp %>%
   geom_col(fill = "steelblue") +
   # geom_errorbar(aes(ymin=lower, ymax=upper), width=0.5) +
   geom_text(hjust=0.5, vjust = 1, color = "white", nudge_y = -0.005, size=3) +
-  facet_grid(cols = vars(capacity_ratio_label),
-             rows = vars(size_label)) +
+  facet_grid(cols = vars(capacity_ratio_label)) +
   scale_y_continuous(labels = scales::percent_format()) +
   # coord_flip() +
   labs(x = NULL,
@@ -499,7 +497,7 @@ ggplot(strategy_tp, aes(x=strategy, y=mean, label=percent_format(accuracy=1)(mea
         panel.grid.major.y = element_blank(),
         panel.grid.minor.y = element_blank(),
         axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
-ggsave("plot3_appendix.svg", width=150, height=75, units="mm")
+ggsave("plot3_appendix.svg", width=150, height=150, units="mm")
 ```
 
 Kretzschmar method
